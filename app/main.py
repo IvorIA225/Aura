@@ -11,7 +11,7 @@ Routes :
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response, Query, HTTPException
+from fastapi import FastAPI, Request, Response, Query, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -101,15 +101,15 @@ async def verify_webhook(
 # ──────────────────────────────────────────────────
 
 @app.post("/webhook")
-async def receive_webhook(request: Request):
+async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Reçoit les messages WhatsApp entrants.
     
     Flow (Framework WAT) :
     1. Parse le payload WhatsApp
     2. Marque le message comme lu (UX)
-    3. Délègue à l'agent pour traitement
-    4. Retourne 200 immédiatement (WhatsApp exige une réponse rapide)
+    3. Délègue à l'agent en tâche de fond (BackgroundTasks)
+    4. Retourne 200 immédiatement (< 100ms) pour éviter les retries Meta
     """
     try:
         body = await request.json()
@@ -133,15 +133,10 @@ async def receive_webhook(request: Request):
     # Marquer comme lu (double coche bleue)
     await mark_as_read(incoming.whatsapp_message_id)
 
-    # Traitement asynchrone par l'agent
-    # NOTE: En production, utiliser un task queue (Celery, etc.) pour
-    # ne pas bloquer la réponse webhook. Pour le PoC, on traite inline.
-    try:
-        await process_message(incoming)
-    except Exception as e:
-        logger.error(f"❌ Erreur traitement message: {e}", exc_info=True)
+    # Traitement non-bloquant en tâche de fond (production-grade)
+    background_tasks.add_task(process_message, incoming)
 
-    # WhatsApp exige un 200 rapide, sinon il retry
+    # WhatsApp exige un 200 immédiat, sinon il renvoie le message en boucle
     return Response(status_code=200)
 
 
