@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Obsidian reference (not part of the app)
+obsidian-ref/
+
+# Temp files
+.tmp/
+*.log
+scratch*
+ROMUALD BRAIN 1/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
