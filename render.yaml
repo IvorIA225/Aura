@@ -5,6 +5,7 @@ services:
     plan: free
     region: frankfurt # ou oregon
     healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: ENVIRONMENT
         value: production

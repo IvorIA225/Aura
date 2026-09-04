@@ -61,7 +61,12 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     """Healthcheck endpoint pour Render et monitoring."""
-    return {"status": "ok", "service": "whatsapp-support-bot"}
+    return {
+        "status": "ok",
+        "service": "whatsapp-support-bot",
+        "brand": "Ella's Fashion House",
+        "version": "1.0.0",
+    }
 
 
 # ──────────────────────────────────────────────────
