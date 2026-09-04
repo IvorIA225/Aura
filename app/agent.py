@@ -60,17 +60,18 @@ async def process_message(incoming: IncomingMessage) -> None:
     """
     settings = get_settings()
 
-    # ── Étape 1 : Détection de langue ──
-    language = _detect_language(incoming.text)
-    logger.info(f"🌍 Langue détectée: {language}")
-
-    # ── Étape 2 : Chargement du contexte ──
+    # ── Étape 1 : Chargement de la conversation & historique ──
     conversation = await get_or_create_conversation(
         phone=incoming.phone,
         name=incoming.name,
-        language=language,
+        language="fr",
     )
     conversation_id = conversation["id"]
+    prev_language = conversation.get("client_language", "fr")
+
+    # Détection de langue robuste (ne bascule pas en anglais sur des messages courts comme 'cool')
+    language = _detect_language(incoming.text, default_lang=prev_language)
+    logger.info(f"🌍 Langue détectée: {language} (précédente: {prev_language})")
 
     # Sauvegarder le message entrant
     await save_message(
@@ -79,8 +80,8 @@ async def process_message(incoming: IncomingMessage) -> None:
         content=incoming.text,
     )
 
-    # Charger l'historique
-    history = await get_conversation_history(incoming.phone)
+    # Charger l'historique récent (6 messages max pour optimiser les tokens et éviter le rate-limit Groq)
+    history = await get_conversation_history(incoming.phone, limit=6)
 
     # Construire le contexte
     context = ConversationContext(
@@ -157,18 +158,34 @@ async def process_message(incoming: IncomingMessage) -> None:
 # Détection de langue
 # ══════════════════════════════════════════════════
 
-def _detect_language(text: str) -> str:
+def _detect_language(text: str, default_lang: str = "fr") -> str:
     """
     Détecte la langue du texte du client.
-    Retourne un code ISO 639-1 (fr, en, es, etc.).
-    Fallback sur 'fr' si la détection échoue.
+    Pour les messages courts (< 30 caractères ou < 6 mots), on conserve la langue par défaut.
     """
-    try:
-        lang = detect_language_raw(text)
-        return lang
-    except Exception:
-        logger.warning("⚠️ Détection de langue échouée, fallback sur 'fr'")
+    cleaned = text.strip()
+    words = cleaned.split()
+    if len(cleaned) < 30 or len(words) < 6:
+        # Message trop court pour être fiable (évite les faux positifs sur 'cool', 'ok', etc.)
+        return default_lang
+
+    # Marqueurs français courants qui trompent parfois les détecteurs de n-grammes
+    fr_markers = {
+        "tu", "vous", "je", "on", "est", "es", "c'est", "salut", "bonjour",
+        "merci", "cool", "toi", "moi", "où", "quel", "quelle", "combien", "svp", "plaît"
+    }
+    if any(w.lower().strip(".,!?") in fr_markers for w in words):
         return "fr"
+
+    try:
+        lang = detect_language_raw(cleaned)
+        # N'accepter une bascule que vers les langues couramment supportées (fr ou en)
+        if lang in ["fr", "en"]:
+            return lang
+        return default_lang
+    except Exception:
+        logger.warning(f"⚠️ Détection de langue échouée, fallback sur '{default_lang}'")
+        return default_lang
 
 
 # ══════════════════════════════════════════════════
@@ -245,6 +262,7 @@ def _build_self_check_prompt(
     original_message: str,
     agent_reply: str,
     client_language: str,
+    client_name: str = "",
 ) -> str:
     """
     Construit le prompt pour le Self-Check (modèle rapide).
@@ -252,6 +270,8 @@ def _build_self_check_prompt(
     """
     knowledge = _load_knowledge_base()
     self_check_workflow = _load_workflow("self_check.md")
+
+    name_info = f"- Prénom / Nom du client : {client_name}" if client_name else "- Prénom du client : Inconnu"
 
     return f"""Tu es un évaluateur de qualité pour un bot de support client WhatsApp.
 Tu dois évaluer la RÉPONSE de l'agent selon 5 critères stricts.
@@ -262,14 +282,19 @@ Tu dois évaluer la RÉPONSE de l'agent selon 5 critères stricts.
 ## BASE DE CONNAISSANCES (source de vérité)
 {knowledge}
 
+## CONTEXTE DU CLIENT
+{name_info}
+- Langue attendue : {client_language}
+
+RÈGLE ESSENTIELLE SUR LE PRÉNOM DU CLIENT & LA POLITESSE :
+- Si l'agent s'adresse au client ou le salue avec son prénom ({client_name or 'le prénom du client'}), ce n'est PAS une information inventée / hallucination, c'est le prénom officiel issu du profil WhatsApp.
+- Les réponses cordiales à un compliment ou remerciement ("Merci !", "Avec plaisir !", "Ravi d'échanger avec vous") font partie de la politesse normale et sont PASSED.
+
 ## MESSAGE DU CLIENT
 {original_message}
 
 ## RÉPONSE DE L'AGENT À ÉVALUER
 {agent_reply}
-
-## LANGUE ATTENDUE
-{client_language}
 
 ## FORMAT DE RÉPONSE (JSON strict)
 Réponds UNIQUEMENT avec ce JSON, rien d'autre :
@@ -324,18 +349,33 @@ async def _generate_with_self_check(
             tokens_used = llm_response.usage.total_tokens if llm_response.usage else 0
 
         except Exception as e:
-            logger.error(f"❌ Erreur LLM (tentative {attempt + 1}): {e}")
-            # Réponse de fallback
-            return AgentResponse(
-                text=_get_fallback_message(context.client_language),
-                language=context.client_language,
-                self_check_result=SelfCheckResult.NEEDS_ESCALATION,
-                self_check_notes=f"Erreur LLM: {str(e)}",
-                should_escalate=True,
-                escalation_reason=f"Erreur technique LLM: {str(e)}",
-                model_used="fallback",
-                tokens_used=0,
+            logger.warning(
+                f"⚠️ Erreur LLM principal ({settings.llm_model}): {e}. "
+                f"Basculement vers le modèle de secours ({settings.llm_model_fast})..."
             )
+            try:
+                llm_response = await litellm.acompletion(
+                    model=settings.llm_model_fast,
+                    messages=messages,
+                    max_tokens=500,
+                    temperature=0.7,
+                )
+                reply_text = llm_response.choices[0].message.content.strip()
+                model_used = f"{settings.llm_model_fast} (fallback)"
+                tokens_used = llm_response.usage.total_tokens if llm_response.usage else 0
+            except Exception as e2:
+                logger.error(f"❌ Erreur LLM même avec modèle de secours: {e2}")
+                # Réponse de fallback
+                return AgentResponse(
+                    text=_get_fallback_message(context.client_language),
+                    language=context.client_language,
+                    self_check_result=SelfCheckResult.NEEDS_ESCALATION,
+                    self_check_notes=f"Erreur LLM: {str(e2)}",
+                    should_escalate=True,
+                    escalation_reason=f"Erreur technique LLM: {str(e2)}",
+                    model_used="fallback",
+                    tokens_used=0,
+                )
 
         # ── Self-Check ──
         check_result = await _run_self_check(
@@ -343,6 +383,7 @@ async def _generate_with_self_check(
             reply_text,
             context.client_language,
             settings,
+            client_name=context.client_name,
         )
 
         logger.info(
@@ -439,6 +480,7 @@ async def _run_self_check(
     agent_reply: str,
     client_language: str,
     settings,
+    client_name: str = "",
 ) -> AgentResponse:
     """
     Exécute le Self-Check via un modèle rapide (Haiku/GPT-4o-mini).
@@ -447,7 +489,12 @@ async def _run_self_check(
     import json
     import re
 
-    prompt = _build_self_check_prompt(original_message, agent_reply, client_language)
+    prompt = _build_self_check_prompt(
+        original_message=original_message,
+        agent_reply=agent_reply,
+        client_language=client_language,
+        client_name=client_name,
+    )
 
     try:
         check_response = await litellm.acompletion(

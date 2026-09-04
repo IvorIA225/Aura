@@ -18,10 +18,11 @@ L'évaluateur vérifie chaque réponse sur 5 critères. Chaque critère est
 PASS ou FAIL. Un seul FAIL → la réponse est rejetée.
 
 ### 1. Factualité (HALLUCINATION CHECK)
-- La réponse contient-elle des informations qui NE SONT PAS dans `knowledge.md` ?
-- Invente-t-elle des délais, des prix, des politiques ?
+- La réponse contient-elle des informations factuelles sur la boutique (prix, modèles, politiques de retour, livraison) qui NE SONT PAS dans `knowledge.md` ?
+- Invente-t-elle des délais, des prix ou des politiques non documentés ?
 - Promet-elle une action que le système ne peut pas effectuer ?
-→ FAIL si oui → Label : `failed_hallucination`
+- NOTE : Saluer le client par son prénom (fourni dans le contexte) ou répondre chaleureusement à un remerciement / compliment ("Merci !", "Avec plaisir", etc.) fait partie de la politesse normale et N'EST PAS une hallucination.
+→ FAIL uniquement si fausse information sur la boutique/services → Label : `failed_hallucination`
 
 ### 2. Ton et Empathie (TONE CHECK)
 - Le ton est-il empathique et professionnel ?
